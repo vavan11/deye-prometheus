@@ -1,5 +1,6 @@
 # Environment / Secrets
 .env
+.deye_token.json
 
 # Python
 __pycache__/

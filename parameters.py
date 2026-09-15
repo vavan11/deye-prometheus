@@ -4,9 +4,13 @@ parameters.py — All numeric parameter definitions for the Deye SUN-3K-SG04LP1-
 Register definitions adapted from StephanJoubert/home_assistant_solarman
 (https://github.com/StephanJoubert/home_assistant_solarman), licensed Apache-2.0.
 
-Only numeric parameters are included here (52 total). String/lookup-only parameters
-(Battery Status, Running Status, Work Mode, etc.) are intentionally omitted since
-Prometheus Gauge metrics cannot represent text values.
+Only numeric parameters are included here (73 total: 48 telemetry + 25 time-of-use
+settings). String/lookup-only parameters (Battery Status, Running Status, Work Mode,
+etc.) are intentionally omitted since Prometheus Gauge metrics cannot represent text
+values.
+
+The `name` of each entry is the contract with cloud_parameters.py — both files use the
+same names so either scrape source produces identical deye_* metric names.
 """
 
 PARAMETERS: list[dict] = []

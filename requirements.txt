@@ -1,3 +1,17 @@
-pysolarmanv5
-prometheus_client
-python-dotenv
+# Exact pins so every build — and every published image — gets the same code.
+# Unpinned, a new (or compromised) release of any package would ship on the next build.
+# To upgrade: bump a version, rebuild, run a scan, commit.
+
+# Direct dependencies
+prometheus_client==0.26.0
+pysolarmanv5==3.0.6
+python-dotenv==1.2.3
+requests==2.34.2
+
+# Transitive dependencies (pinned too, or they would still float)
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+pyserial==3.5
+uModbus==1.0.4
+urllib3==2.7.0

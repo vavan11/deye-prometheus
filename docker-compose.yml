@@ -1,0 +1,60 @@
+# Deye Prometheus exporter
+#
+#   cp .env.example .env      # fill in your settings
+#   docker compose up -d
+#   curl localhost:9105/metrics
+#
+# Credentials come from .env at runtime and are never baked into the image.
+# To keep them out of the container environment entirely, use the Docker secrets
+# variant in the README ("Docker secrets") — every CLOUD_* credential also accepts a
+# <NAME>_FILE form.
+
+services:
+  deye-exporter:
+    build:
+      context: .
+    image: deye-exporter:latest
+    container_name: deye-exporter
+    restart: unless-stopped
+
+    env_file:
+      - .env
+    environment:
+      # Overrides .env: the token cache must live on the writable /data volume.
+      # The .env.example default resolves inside /app, which is read-only here.
+      CLOUD_TOKEN_CACHE: /data/token.json
+
+    # Host and container port stay in step when EXPORTER_PORT is changed in .env.
+    # Prefix with 127.0.0.1: to keep /metrics off the LAN if Prometheus runs locally.
+    ports:
+      - "${EXPORTER_PORT:-9105}:${EXPORTER_PORT:-9105}"
+
+    volumes:
+      - deye-data:/data
+
+    # Hardening — the image is built to run like this.
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.50"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # For DEYE_SOURCE=local the container must reach the inverter's Wi-Fi logger on
+    # port 8899. Default bridge networking usually can; if not (Linux only):
+    # network_mode: host
+
+volumes:
+  deye-data:

@@ -1,0 +1,22 @@
+# ALLOWLIST — ignore everything, then re-include only what the image needs.
+#
+# A denylist ("exclude .env") only protects against secrets someone thought of in
+# advance. With an allowlist, any new file — .env.prod, a *.pem key, a token dump,
+# a backup — is kept out of the build context by default and can never reach an
+# image layer. If you add a runtime file, add a matching "!" line below.
+*
+!*.py
+!requirements.txt
+
+# Belt and braces: nothing above re-includes these, but keep them denied explicitly
+# in case the allowlist is ever loosened.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*token*.json
+secrets/
+.git
+__pycache__/
+*.py[cod]
