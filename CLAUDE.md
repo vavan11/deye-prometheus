@@ -11,7 +11,7 @@ Container files: `Dockerfile` (non-root UID/GID 10001, Debian security updates a
 It has **two interchangeable scrape sources**, selected by `DEYE_SOURCE` (or `--source`), one per process:
 
 - **`local`** (default) — Solarman V5 straight to the Wi-Fi data logger over TCP 8899 via `pysolarmanv5`. No cloud account. Exposes all 73 metrics.
-- **`cloud`** — the Deye Cloud OpenAPI (`developer.deyecloud.com`). Needs an approved developer app, no LAN access. Exposes **39**: the 48 non-TOU metrics minus 9 the cloud has no key for (all L2/per-phase figures on this single-phase unit, both internal-CT powers, and `Alert`). The 25 time-of-use entries are *settings*, not telemetry, and aren't in `/device/latest` either.
+- **`cloud`** — the Deye Cloud OpenAPI (`developer.deyecloud.com`). Needs an approved developer app, no LAN access. Exposes **64**: the 48 non-TOU metrics minus 9 the cloud has no key for (all L2/per-phase figures on this single-phase unit, both internal-CT powers, and `Alert`), plus all 25 time-of-use settings. TOU is *not* in `/device/latest` — it comes from the separate read-only endpoint `/v1.0/config/tou` on its own slow timer (`CLOUD_TOU_INTERVAL`, default 900s), because settings change rarely.
 
 **The invariant that matters: both sources emit identical `deye_*` metric names.** That is what lets `grafana/dashboard.json` work unchanged with either. It holds because `cloud_parameters.py` reuses the exact `name` strings from `parameters.py`, and `exporter._sanitize()` derives the metric name from that string. Changing a `name` in one file without the other silently forks the series.
 
@@ -37,7 +37,7 @@ Requires **Python 3.10+** (`float | None` annotations are evaluated at import ti
 
 - Shared: `DEYE_SOURCE`, `EXPORTER_PORT`, `POLL_INTERVAL` (default 60).
 - Local: `INVERTER_IP`, `INVERTER_SERIAL` (the *logger's* serial), `INVERTER_PORT`, `INVERTER_MB_SLAVE_ID`.
-- Cloud: `CLOUD_BASE_URL`, `CLOUD_APP_ID`, `CLOUD_APP_SECRET`, `CLOUD_EMAIL`, `CLOUD_PASSWORD`, `CLOUD_COMPANY_ID`, `CLOUD_DEVICE_SN` (the *inverter's* serial — a different value from `INVERTER_SERIAL`), `CLOUD_TOKEN_CACHE`, `CLOUD_EXPOSE_UNMAPPED`, `CLOUD_TIMEOUT`.
+- Cloud: `CLOUD_TOU_INTERVAL`, `CLOUD_BASE_URL`, `CLOUD_APP_ID`, `CLOUD_APP_SECRET`, `CLOUD_EMAIL`, `CLOUD_PASSWORD`, `CLOUD_COMPANY_ID`, `CLOUD_DEVICE_SN` (the *inverter's* serial — a different value from `INVERTER_SERIAL`), `CLOUD_TOKEN_CACHE`, `CLOUD_EXPOSE_UNMAPPED`, `CLOUD_TIMEOUT`.
 
 When deployed as a systemd service (see README for the full unit file), dependencies must be installed with the venv's full pip path (`/opt/deye-env/bin/pip install ...`), not from inside an activated venv — otherwise systemd's `ExecStart` picks up the wrong interpreter/packages.
 
@@ -88,10 +88,55 @@ When deployed as a systemd service (see README for the full unit file), dependen
 
 Register definitions and decode rules are adapted from `StephanJoubert/home_assistant_solarman` (Apache-2.0); the Solarman V5 client itself is the third-party `pysolarmanv5` package — check upstream there before assuming a decoding bug is local to this repo. The cloud API shapes were taken from Deye's live OpenAPI spec at `https://eu1-developer.deyecloud.com/v2/api-docs` and their `DeyeCloudDevelopers/deye-openapi-client-sample-code` samples.
 
-`grafana/dashboard.json` is an importable dashboard covering the exposed metrics; it isn't validated by any code and won't fail silently-wrong if metric names drift, so update it by hand when renaming/adding parameters. It references 46 metrics, all non-TOU — so cloud mode covers every panel. A quick check that a change hasn't broken it:
+`grafana/dashboard.json` is an importable dashboard covering the exposed metrics; it isn't validated by any code and won't fail silently-wrong if metric names drift, so update it by hand when renaming/adding parameters. It references 46 metrics, all non-TOU. Local mode covers all 46; cloud mode covers 38 — the 8 it misses are the single-phase/internal-CT/Alert gap listed at the foot of `cloud_parameters.py`. A quick check that a change hasn't broken it:
 
 ```bash
 curl -s localhost:9105/metrics | grep -o '^deye_[a-z0-9_]*' | sort -u > /tmp/emitted.txt
 grep -o 'deye_[a-z0-9_]*' grafana/dashboard.json | sort -u > /tmp/dash.txt
 comm -13 /tmp/emitted.txt /tmp/dash.txt     # must be empty
 ```
+
+## Deye Cloud API quota (cloud mode only)
+
+From https://developer.deyecloud.com/best-practices. **Not enforced yet** — the page says
+metering, quota and rate-limit controls "will be introduced later", the figures are marked
+preliminary, no `X-RateLimit-*` headers come back today, and 10 back-to-back calls all
+returned 200. Treat these as the budget to design against, not a live constraint.
+
+| Announced limit | Value |
+|---|---|
+| Base quota | 100,000 calls / month |
+| Rate limit | 60 QPM, per application (appId) |
+| Recommended polling | 1–2 min |
+| Over the limit | HTTP 429, no valid data |
+
+**Measured** call cost — exactly 1 HTTP call per poll, verified by counting
+`requests.Session.post` over real polls; the cached token adds none:
+
+| Source | Interval | Calls/day |
+|---|---|---|
+| `/device/latest` | `POLL_INTERVAL` (60s) | 1440 |
+| `/config/tou` | `CLOUD_TOU_INTERVAL` (900s) | 96 |
+| `/account/token` | ~60-day token, cached to disk | ~0 |
+
+At the defaults that is **1536/day ≈ 47% of the monthly quota** (43% in February, 47.6% in a
+31-day month) and a peak of **2 QPM against the 60 limit** — QPM is a non-issue; the monthly
+quota is the only real constraint.
+
+Things that change the sum, worth knowing before tuning:
+
+- **Failed polls still cost quota.** A Deye outage doesn't reduce usage; the loop keeps polling.
+- **The quota is per appId.** A second exporter sharing these credentials doubles it to ~94%.
+  Run a test instance against the same app and the two compete.
+- `POLL_INTERVAL=120` halves usage to ~25% and matches Deye's own recommendation. It costs
+  almost no freshness: the logger only uploads every 1–5 min, so a 60s poll often returns an
+  unchanged `collectionTime` — which is what `deye_data_timestamp_seconds` exists to show.
+- `CLOUD_TOU_INTERVAL=0` disables TOU, saving only ~3% — not worth it.
+
+**Known gap:** there is no 429 handling. `_post()` turns a 429 into a generic `DeyeCloudError`,
+so the poll fails, `deye_up` goes 0 and it retries at the next interval, ignoring `Retry-After`.
+That is not a retry storm (one attempt per minute), but it keeps consuming quota while limited.
+Deye's checklist asks for exponential backoff on 429/5xx — add it before the controls go live.
+
+Already aligned with their guidance: poll by device SN rather than the plant hierarchy, no
+`device/list` in the poll loop, token cached for its full life, and TOU on a slow timer.

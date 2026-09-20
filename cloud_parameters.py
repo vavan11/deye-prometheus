@@ -112,8 +112,109 @@ CLOUD_PARAMETERS += [
 #       No fault/alarm bitmask key is returned. MAIN / HMI / ProtocolVersion are
 #       firmware version strings, not fault codes.
 #
-# The 25 "Time of Use" entries are inverter *settings*, not telemetry, and are likewise
-# absent from /device/latest — reading them would need the /v1.0/system/* endpoints,
-# which cloud mode deliberately does not call.
+# The 25 "Time of Use" entries are inverter *settings* and are absent from /device/latest,
+# but they ARE available from the dedicated read-only endpoint /v1.0/config/tou — see
+# TOU_PARAMETERS and parse_tou() below.
 #
-# Net: cloud mode emits 39 of the 48 non-TOU metrics; local mode still emits all 73.
+# Net: cloud mode emits 39 of the 48 non-TOU metrics, plus 25 TOU = 64; local mode emits 73.
+
+
+# ══ Time of Use ═══════════════════════════════════════════════════════════════
+#
+# Sourced from POST /v1.0/config/tou, not /device/latest, and refreshed on its own
+# slow timer (CLOUD_TOU_INTERVAL) because these are settings that change rarely.
+#
+# Response shape, verified live:
+#     touAction: "on"
+#     timeUseSettingItems: [ {time, power, soc, voltage,
+#                             enableGridCharge, enableGeneration}, ... x6 ]
+#
+# Names are copied verbatim from parameters.py's "tou" group so cloud and local emit
+# identical deye_time_of_use_* series. test_tou.py asserts that equality.
+
+TOU_SLOTS = 6
+
+TOU_PARAMETERS: list[dict] = [
+    {"name": "Time of Use", "group": "tou", "uom": "",
+     "help": "Time-of-use master enable (0=off, 1=on)"},
+]
+for _n in range(1, TOU_SLOTS + 1):
+    TOU_PARAMETERS += [
+        {"name": f"Time of Use Time {_n}",   "group": "tou", "uom": "",
+         "help": f"TOU slot {_n} end time (HHMM)"},
+        {"name": f"Time of Use Power {_n}",  "group": "tou", "uom": "W",
+         "help": f"TOU slot {_n} charge power limit"},
+        {"name": f"Time of Use SOC {_n}",    "group": "tou", "uom": "%",
+         "help": f"TOU slot {_n} minimum SOC"},
+        {"name": f"Time of Use Enable {_n}", "group": "tou", "uom": "",
+         "help": f"TOU slot {_n} grid charge enabled"},
+    ]
+
+# Cloud-only: no local register equivalent, so they are gated behind
+# CLOUD_EXPOSE_UNMAPPED to keep the default output name-identical to local mode.
+TOU_EXTRA_PARAMETERS: list[dict] = []
+for _n in range(1, TOU_SLOTS + 1):
+    TOU_EXTRA_PARAMETERS += [
+        {"name": f"Time of Use Voltage {_n}",    "group": "tou", "uom": "V",
+         "help": f"TOU slot {_n} battery voltage setpoint (cloud only)"},
+        {"name": f"Time of Use Generation {_n}", "group": "tou", "uom": "",
+         "help": f"TOU slot {_n} generator charge enabled (cloud only)"},
+    ]
+
+
+def _tou_time(value) -> float | None:
+    """
+    "0700" -> 700.0, matching the local HHMM register exactly.
+
+    int() rather than float(): "0700" would be fine either way, but a value like
+    "07:00" must not silently become something wrong — it returns None instead.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return float(int(text)) if text.isdigit() else None
+
+
+def parse_tou(tou_action, items, include_extras: bool = False) -> dict[str, float]:
+    """
+    Turn a /config/tou response into {metric name: value}.
+
+    Pure function — no network, no state — so the mapping is testable directly.
+    A short or empty item list simply yields no value for the missing slots rather
+    than inventing zeros.
+    """
+    out: dict[str, float] = {}
+
+    if tou_action is not None:
+        out["Time of Use"] = 1.0 if str(tou_action).strip().lower() in ("on", "true", "1") else 0.0
+
+    for index, item in enumerate(items or [], start=1):
+        if index > TOU_SLOTS or not isinstance(item, dict):
+            break
+
+        slot_time = _tou_time(item.get("time"))
+        if slot_time is not None:
+            out[f"Time of Use Time {index}"] = slot_time
+
+        for field, name in (("power", "Power"), ("soc", "SOC")):
+            value = item.get(field)
+            if value is not None:
+                try:
+                    out[f"Time of Use {name} {index}"] = float(value)
+                except (TypeError, ValueError):
+                    pass
+
+        # The local register is read with mask 1, i.e. bit 0 = grid charge enable.
+        if item.get("enableGridCharge") is not None:
+            out[f"Time of Use Enable {index}"] = 1.0 if item["enableGridCharge"] else 0.0
+
+        if include_extras:
+            if item.get("voltage") is not None:
+                try:
+                    out[f"Time of Use Voltage {index}"] = float(item["voltage"])
+                except (TypeError, ValueError):
+                    pass
+            if item.get("enableGeneration") is not None:
+                out[f"Time of Use Generation {index}"] = 1.0 if item["enableGeneration"] else 0.0
+
+    return out

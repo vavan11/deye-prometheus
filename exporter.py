@@ -47,6 +47,7 @@ class DeyeExporter:
         self.up = None
         self.scrape_duration = None
         self.data_timestamp = None
+        self.tou_timestamp = None
 
     def _ensure_gauge(self, name: str, description: str = "") -> Gauge | None:
         """
@@ -94,6 +95,12 @@ class DeyeExporter:
             "deye_data_timestamp_seconds",
             "Epoch timestamp of the underlying reading (cloud collectionTime) [s]",
         )
+        # TOU settings refresh on their own slow timer, so they look "stuck" by design.
+        # This makes a genuinely stale fetch distinguishable from a working one.
+        self.tou_timestamp = Gauge(
+            "deye_tou_timestamp_seconds",
+            "Epoch timestamp of the last successful time-of-use config fetch [s]",
+        )
 
     def collect(self) -> None:
         """Poll the backend and update all gauges."""
@@ -111,6 +118,8 @@ class DeyeExporter:
             self.scrape_duration.set(time.monotonic() - started)
         if self.data_timestamp is not None and self.backend.collection_time:
             self.data_timestamp.set(self.backend.collection_time)
+        if self.tou_timestamp is not None and getattr(self.backend, "tou_timestamp", None):
+            self.tou_timestamp.set(self.backend.tou_timestamp)
 
     def run(self) -> None:
         """Start the HTTP server (metrics + probes) and enter the polling loop."""

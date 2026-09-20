@@ -234,6 +234,17 @@ class DeyeCloudClient:
         )
         return body.get("measurePoints") or []
 
+    def tou_config(self, device_sn: str) -> tuple[str | None, list[dict]]:
+        """
+        Fetch the time-of-use configuration (read-only despite living under /config).
+
+        Returns (touAction, timeUseSettingItems) where touAction is the master switch
+        ("on"/"off") and each item carries time / power / soc / voltage /
+        enableGridCharge / enableGeneration for one of the six slots.
+        """
+        body = self._post("/config/tou", {"deviceSn": device_sn})
+        return body.get("touAction"), (body.get("timeUseSettingItems") or [])
+
     def latest(self, device_sn: str) -> tuple[dict, list[dict], int | None]:
         """
         Fetch the latest data point set for one device.

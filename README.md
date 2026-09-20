@@ -6,7 +6,7 @@ with **two interchangeable scrape sources**:
 | Source | How it reads | Metrics | Needs |
 |--------|--------------|---------|-------|
 | `local` *(default)* | Solarman V5 over local TCP (port 8899) | **73** | Same LAN as the inverter |
-| `cloud` | [Deye Cloud OpenAPI](https://developer.deyecloud.com/api) | **39** | Internet + a Deye developer app |
+| `cloud` | [Deye Cloud OpenAPI](https://developer.deyecloud.com/api) | **64** | Internet + a Deye developer app |
 
 Both emit **identical `deye_*` metric names**, so `grafana/dashboard.json` works with
 either one — no query edits. Only one source runs per process; pick it with `DEYE_SOURCE`.
@@ -192,9 +192,11 @@ inverter doesn't report. `python main.py --dump` re-checks this against your own
   poll often returns unchanged values. `deye_data_timestamp_seconds` exposes the
   reading's true age — alert on
   `time() - deye_data_timestamp_seconds > 900` rather than assuming freshness.
-- **Time-of-Use metrics are local-only.** The 25 `deye_time_of_use_*` gauges are inverter
-  *settings*, not telemetry, and aren't returned by `/device/latest`. Reading them would
-  need the `/v1.0/system/*` endpoints, which cloud mode deliberately doesn't call.
+- **Time-of-Use settings are scraped too.** The 25 `deye_time_of_use_*` gauges don't come
+  from `/device/latest` — they have their own read-only endpoint, `/v1.0/config/tou`, polled
+  on a slower timer (`CLOUD_TOU_INTERVAL`, default 900s) because they change rarely.
+  `deye_tou_timestamp_seconds` shows when they were last read. A failure there is logged and
+  the previous values are kept: it never fails the telemetry poll or flips `deye_up`.
 - Set `CLOUD_EXPOSE_UNMAPPED=true` to also expose measure points that have no local
   equivalent, as `deye_cloud_<key>` gauges.
 
@@ -483,7 +485,7 @@ scrape_configs:
 
 ---
 
-## 📈 Exposed Metrics (73 local / 39 cloud)
+## 📈 Exposed Metrics (73 local / 64 cloud)
 
 | Group | Count | Cloud | Examples |
 |-------|-------|:-----:|---------|
@@ -493,9 +495,9 @@ scrape_configs:
 | Load | 6 | ✅ | `deye_total_load_power`, `deye_daily_load_consumption` |
 | Inverter | 9 | ✅ | `deye_dc_temperature`, `deye_grid_frequency`, `deye_total_power` |
 | Alert | 1 | ✅ | `deye_alert` (fault bitmask) |
-| Time of Use | 25 | ❌ | `deye_time_of_use_soc_1` … `deye_time_of_use_enable_6` |
+| Time of Use | 25 | ✅ | `deye_time_of_use_soc_1` … `deye_time_of_use_enable_6` |
 
-Cloud mode emits **39** of the 48 non-TOU metrics — see
+Cloud mode emits **39** of the 48 non-TOU metrics, plus all 25 Time-of-Use = **64** — see
 [what cloud mode can't provide](#what-cloud-mode-cant-provide) for the 9 it can't.
 
 Plus three health metrics in both modes:
@@ -505,6 +507,7 @@ Plus three health metrics in both modes:
 | `deye_up` | `1` if the last poll succeeded, `0` otherwise |
 | `deye_scrape_duration_seconds` | How long the last poll took |
 | `deye_data_timestamp_seconds` | Timestamp of the underlying reading (cloud only — shows true data age) |
+| `deye_tou_timestamp_seconds` | Timestamp of the last successful time-of-use config fetch (cloud only) |
 
 > **String-only metrics** (Battery Status, Running Status, Work Mode, etc.) are available in the  
 > `HA/deye_hybrid.yaml` for Home Assistant but are not exposed as Prometheus gauges 

@@ -9,11 +9,14 @@ the numbers came off the LAN or out of Deye's cloud:
     .read_values()         -> dict[str, float] keyed by the SAME `name` strings
     .collection_time       -> epoch seconds of the underlying reading, or None
     .extra_descriptions    -> help text for names not present in .parameters
+    .tou_timestamp         -> epoch of the last successful TOU fetch, or None (cloud)
 
 Metric-name parity between the two backends is the whole point: `name` strings are
 shared between parameters.py and cloud_parameters.py, so exporter._sanitize() yields
 identical deye_* series either way and grafana/dashboard.json needs no edits.
 """
+import time
+
 from config import (
     CLOUD_APP_ID,
     CLOUD_APP_SECRET,
@@ -21,9 +24,15 @@ from config import (
     CLOUD_EMAIL,
     CLOUD_EXPOSE_UNMAPPED,
     CLOUD_PASSWORD,
+    CLOUD_TOU_INTERVAL,
 )
 from cloud import DeyeCloudClient
-from cloud_parameters import CLOUD_PARAMETERS
+from cloud_parameters import (
+    CLOUD_PARAMETERS,
+    TOU_EXTRA_PARAMETERS,
+    TOU_PARAMETERS,
+    parse_tou,
+)
 from decoders import decode
 from inverter import InverterClient
 from parameters import PARAMETERS
@@ -48,6 +57,7 @@ class LocalBackend:
         self.parameters = PARAMETERS
         self.client = InverterClient()
         self.collection_time = None
+        self.tou_timestamp = None
         self.extra_descriptions: dict[str, str] = {}
 
     def read_values(self) -> dict[str, float]:
@@ -66,7 +76,8 @@ class CloudBackend:
     name = "cloud"
 
     def __init__(self, client: DeyeCloudClient | None = None, device_sn: str = CLOUD_DEVICE_SN,
-                 expose_unmapped: bool = CLOUD_EXPOSE_UNMAPPED):
+                 expose_unmapped: bool = CLOUD_EXPOSE_UNMAPPED,
+                 tou_interval: int = CLOUD_TOU_INTERVAL):
         missing = [
             var for var, val in (
                 ("CLOUD_APP_ID", CLOUD_APP_ID),
@@ -84,16 +95,32 @@ class CloudBackend:
                   "(the inverter serial — not INVERTER_SERIAL, which is the logger's)."
             )
 
-        self.parameters = CLOUD_PARAMETERS
         self.client = client or DeyeCloudClient()
         self.device_sn = device_sn
         self.expose_unmapped = expose_unmapped
+        self.tou_interval = tou_interval
         self.collection_time = None
+        self.tou_timestamp = None
         self.extra_descriptions: dict[str, str] = {}
 
-        # Every key (primary + alternates) claimed by the mapping table.
-        self._claimed = {p["key"] for p in self.parameters}
-        for p in self.parameters:
+        # Declare the TOU gauges up front so they exist before the first slow fetch.
+        self.parameters = list(CLOUD_PARAMETERS)
+        if tou_interval > 0:
+            self.parameters += TOU_PARAMETERS
+            if expose_unmapped:
+                self.parameters += TOU_EXTRA_PARAMETERS
+
+        # Only these carry a measure-point `key`; TOU entries come from /config/tou and
+        # must never enter the key-lookup loop below.
+        self._measure_parameters = CLOUD_PARAMETERS
+
+        # Cached TOU values, re-merged on every poll between refreshes.
+        self._tou_values: dict[str, float] = {}
+        self._tou_fetched_at: float | None = None
+
+        # Every key (primary + alternates) claimed by the measure-point mapping table.
+        self._claimed = {p["key"] for p in CLOUD_PARAMETERS}
+        for p in CLOUD_PARAMETERS:
             self._claimed.update(p.get("alt_keys", []))
 
     @staticmethod
@@ -109,7 +136,7 @@ class CloudBackend:
         self.collection_time = collection_time
 
         out: dict[str, float] = {}
-        for p in self.parameters:
+        for p in self._measure_parameters:
             raw = self._pick(p, values)
             number = to_float(raw)
             if number is None:
@@ -132,7 +159,41 @@ class CloudBackend:
                 label = item.get("name") or key
                 self.extra_descriptions[name] = f"{label} [{unit}]" if unit else str(label)
 
+        out.update(self._tou())
         return out
+
+    def _tou(self) -> dict[str, float]:
+        """
+        Time-of-use settings, refreshed on their own slow timer.
+
+        Isolated from the telemetry poll on purpose: a /config/tou failure must not fail
+        read_values(), because that would flip deye_up to 0 and drop the pod out of the
+        Service via /readyz over a secondary reading that changes maybe monthly. On
+        failure we log once and keep serving the previous values.
+        """
+        if self.tou_interval <= 0:
+            return {}
+
+        due = (self._tou_fetched_at is None
+               or time.monotonic() - self._tou_fetched_at >= self.tou_interval)
+        if not due:
+            return self._tou_values
+
+        try:
+            action, items = self.client.tou_config(self.device_sn)
+        except Exception as exc:
+            # Deliberately broad: DeyeCloudError covers HTTP and envelope failures, but an
+            # unexpected response shape would raise TypeError/KeyError instead. Any of them
+            # must leave telemetry — and deye_up — untouched.
+            print(f"[deye-exporter] TOU fetch failed (keeping previous values): {exc}")
+            # Back off a full interval rather than retrying on every poll.
+            self._tou_fetched_at = time.monotonic()
+            return self._tou_values
+
+        self._tou_values = parse_tou(action, items, include_extras=self.expose_unmapped)
+        self._tou_fetched_at = time.monotonic()
+        self.tou_timestamp = time.time()
+        return self._tou_values
 
 
 def get_backend(source: str):

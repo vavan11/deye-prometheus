@@ -52,6 +52,11 @@ CLOUD_DEVICE_TYPE     = os.getenv("CLOUD_DEVICE_TYPE", "INVERTER")
 CLOUD_TOKEN_CACHE     = os.getenv("CLOUD_TOKEN_CACHE", ".deye_token.json")
 CLOUD_EXPOSE_UNMAPPED = os.getenv("CLOUD_EXPOSE_UNMAPPED", "false").strip().lower() == "true"
 CLOUD_TIMEOUT         = int(os.getenv("CLOUD_TIMEOUT", "20"))
+# Time-of-use settings come from a separate endpoint (/config/tou) and change rarely, so
+# they get their own slow timer rather than riding the telemetry poll. Deye publishes no
+# rate limit, but there is nothing to gain from re-fetching settings every minute.
+# 0 disables TOU scraping entirely.
+CLOUD_TOU_INTERVAL    = int(os.getenv("CLOUD_TOU_INTERVAL", "900"))
 
 # ── Exporter ───────────────────────────────────────────────────────────────────
 EXPORTER_PORT        = int(os.getenv("EXPORTER_PORT", "9105"))
